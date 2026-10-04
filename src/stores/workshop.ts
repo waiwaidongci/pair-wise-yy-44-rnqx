@@ -1,8 +1,10 @@
 import { computed, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
+import { envelopeFor } from '../lib/stage-geometry'
 
 export type Department = '舞台' | '灯光' | '音响' | '道具'
 export type Point = { x: number; y: number }
+export type EnvelopeSource = '路线' | '起退点补算'
 
 export type Comment = {
   id: string
@@ -24,6 +26,9 @@ export type Cue = {
   entry: Point
   exit: Point
   route: Point[]
+  /** 运动包络（舞台百分比矩形）；旧提示缺省，按起退点补算。 */
+  envelope?: { x: number; y: number; w: number; h: number }
+  envelopeSource?: EnvelopeSource
   note: string
   status: '草稿' | '待确认' | '已确认'
   comments: Comment[]
@@ -143,6 +148,22 @@ export const seedCues: Cue[] = [
     status: '待确认',
     comments: [],
   },
+  {
+    id: 'C-07',
+    act: '第二幕',
+    scene: '风暴',
+    time: '00:21:00',
+    title: '演员横穿升降台危险区',
+    department: '舞台',
+    owner: '群演甲组',
+    duration: 180,
+    entry: { x: 30, y: 88 },
+    exit: { x: 46, y: 86 },
+    route: [{ x: 30, y: 88 }, { x: 38, y: 87 }, { x: 46, y: 86 }],
+    note: '升降台启动时沿台口横穿，未离开危险区前机械与爆闪必须待命。',
+    status: '草稿',
+    comments: [],
+  },
 ]
 
 const STORAGE_KEY = 'stage-scheduler-draft-v1'
@@ -151,6 +172,14 @@ export const useWorkshopStore = defineStore('workshop', () => {
   const saved = localStorage.getItem(STORAGE_KEY)
   const restored = saved ? (JSON.parse(saved) as { cues?: Cue[]; revision?: number }) : null
   const cues = ref<Cue[]>(restored?.cues?.length ? restored.cues : structuredClone(seedCues))
+
+  // 旧提示缺包络：按入场点、路线节点、退场点（起退点）补算一版。
+  for (const cue of cues.value) {
+    if (!cue.envelope || !cue.envelopeSource) {
+      cue.envelope = envelopeFor(cue)
+      cue.envelopeSource = '起退点补算'
+    }
+  }
   const selectedId = ref('C-01')
   const zoom = ref(100)
   const actFilter = ref('全部')
@@ -197,7 +226,13 @@ export const useWorkshopStore = defineStore('workshop', () => {
     snapshot()
     const index = cues.value.findIndex((cue) => cue.id === selectedId.value)
     if (index < 0) return
-    cues.value[index] = { ...cues.value[index], ...patch }
+    const next = { ...cues.value[index], ...patch }
+    // 时间、路线或部门一改，包络按起退点重算（占用指纹随之失效，需重新确认）。
+    if (patch.entry || patch.exit || patch.route) {
+      next.envelope = envelopeFor(next)
+      next.envelopeSource = '路线'
+    }
+    cues.value[index] = next
     if (addRevision) rev.value += 1
   }
 
@@ -223,6 +258,8 @@ export const useWorkshopStore = defineStore('workshop', () => {
       entry: { x: 10, y: 50 },
       exit: { x: 90, y: 50 },
       route: [{ x: 10, y: 50 }, { x: 90, y: 50 }],
+      envelope: envelopeFor({ entry: { x: 10, y: 50 }, exit: { x: 90, y: 50 }, route: [{ x: 10, y: 50 }, { x: 90, y: 50 }] }),
+      envelopeSource: '路线',
       note: '',
       status: '草稿',
       comments: [],

@@ -2,16 +2,37 @@
 import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useWorkshopStore, type Cue, type Department } from '../stores/workshop'
+import { useOccupancyStore } from '../stores/occupancy'
+import { dangerEnvelopeFor, envelopeFor, fmtTime, isMachinery } from '../lib/stage-geometry'
 
 const store = useWorkshopStore()
+const occupancy = useOccupancyStore()
 const commentText = ref('')
 const showRouteEditor = ref(true)
+const showEnvelopes = ref(true)
 const departments: Array<'全部' | Department> = ['全部', '舞台', '灯光', '音响', '道具']
 const acts = ['全部', '第一幕', '第二幕', '第三幕']
 
 const cue = computed(() => store.selectedCue)
 const routePoints = computed(() => cue.value?.route.map((point) => `${point.x},${point.y}`).join(' ') ?? '')
-const conflictCues = computed(() => new Set(store.conflicts.map((item) => item.id)))
+const conflictCues = computed(
+  () => new Set(occupancy.conflicts.flatMap((item) => item.cueIds)),
+)
+const heldMap = computed(() => occupancy.held)
+
+function cueState(item: Cue): 'held' | 'conflict' | 'occupied' | 'invalid' | 'idle' {
+  const status = occupancy.statusOf(item.id)
+  if (status === '已失效') return 'invalid'
+  if (heldMap.value.has(item.id)) return 'held'
+  if (conflictCues.value.has(item.id)) return 'conflict'
+  if (status === '已生效' || status === '待命') return 'occupied'
+  return 'idle'
+}
+
+function heldUntil(item: Cue): string {
+  const held = heldMap.value.get(item.id)
+  return held ? fmtTime(held.until) : ''
+}
 
 function selectCue(item: Cue) {
   store.selectedId = item.id
@@ -60,13 +81,13 @@ function updateCue(key: keyof Cue, value: unknown) {
     </div>
 
     <el-alert
-      v-if="store.conflicts.length"
+      v-if="occupancy.conflicts.length"
       class="conflict-alert"
       type="warning"
       show-icon
       :closable="false"
-      :title="`发现 ${store.conflicts.length} 个同时触发节点`"
-      description="系统已高亮冲突提示，请在右侧检查触发时间与部门优先级。"
+      :title="`发现 ${occupancy.conflicts.length} 项舞台占用冲突（时空重叠 / 安全互锁）`"
+      description="已按运动范围预占舞台区：重叠标红，机械与爆闪在演员未腾空危险区时待命。请在下方占用批次核对。"
     />
 
     <div class="toolbar panel">
@@ -85,6 +106,7 @@ function updateCue(key: keyof Cue, value: unknown) {
         <el-slider v-model="store.zoom" :min="70" :max="150" :step="5" style="width: 150px" />
       </div>
       <el-switch v-model="showRouteEditor" active-text="路线编辑" />
+      <el-switch v-model="showEnvelopes" active-text="包络/危险区" />
       <el-button @click="store.addCue" :disabled="store.locked">新增提示</el-button>
       <el-tag :type="store.locked ? 'success' : 'info'" effect="plain">{{ store.locked ? '基线已锁定' : '草稿编辑中' }}</el-tag>
     </div>
@@ -113,6 +135,30 @@ function updateCue(key: keyof Cue, value: unknown) {
               <rect x="5" y="88" width="90" height="9" rx="1" class="apron" />
               <line x1="50" y1="14" x2="50" y2="88" class="center-line" />
               <template v-for="item in store.filteredCues" :key="item.id">
+                <template v-if="showEnvelopes">
+                  <rect
+                    v-if="isMachinery(item)"
+                    :x="dangerEnvelopeFor(item).x"
+                    :y="dangerEnvelopeFor(item).y"
+                    :width="dangerEnvelopeFor(item).w"
+                    :height="dangerEnvelopeFor(item).h"
+                    class="danger-zone"
+                  />
+                  <rect
+                    :x="envelopeFor(item).x"
+                    :y="envelopeFor(item).y"
+                    :width="envelopeFor(item).w"
+                    :height="envelopeFor(item).h"
+                    :class="['envelope', `state-${cueState(item)}`, { selected: item.id === store.selectedId }]"
+                  />
+                  <text
+                    v-if="heldMap.has(item.id)"
+                    :x="envelopeFor(item).x + envelopeFor(item).w / 2"
+                    :y="envelopeFor(item).y - 1.2"
+                    class="held-label"
+                    text-anchor="middle"
+                  >待命 · {{ heldUntil(item) }}</text>
+                </template>
                 <polyline
                   v-if="item.route.length > 1"
                   :points="item.route.map((point) => `${point.x},${point.y}`).join(' ')"
@@ -133,6 +179,9 @@ function updateCue(key: keyof Cue, value: unknown) {
               <span><i class="entry" />入场</span>
               <span><i class="way" />路线</span>
               <span><i class="exit" />退场</span>
+              <span><i class="env" />占用包络</span>
+              <span><i class="danger" />机械危险区</span>
+              <span><i class="held" />待命</span>
             </div>
           </div>
         </div>
@@ -171,6 +220,17 @@ function updateCue(key: keyof Cue, value: unknown) {
             <el-form-item label="路线节点 / 触发时机">
               <div class="route-summary">
                 <span v-for="(point, index) in cue.route" :key="index">{{ index === 0 ? '入' : index === cue.route.length - 1 ? '出' : index }} ({{ point.x }},{{ point.y }})</span>
+              </div>
+              <div class="envelope-meta">
+                <el-tag size="small" effect="plain" type="info">
+                  包络 {{ envelopeFor(cue).w }}×{{ envelopeFor(cue).h }} · {{ cue.envelopeSource === '起退点补算' ? '按起退点补算' : '按路线生成' }}
+                </el-tag>
+                <el-tag v-if="heldMap.has(cue.id)" size="small" type="warning" effect="dark">
+                  待命至 {{ heldUntil(cue) }}
+                </el-tag>
+                <el-tag v-else-if="occupancy.statusOf(cue.id) === '已失效'" size="small" type="danger" effect="plain">
+                  占用已失效，需重新确认
+                </el-tag>
               </div>
             </el-form-item>
           </el-form>
@@ -339,6 +399,50 @@ function updateCue(key: keyof Cue, value: unknown) {
   stroke-dasharray: 2 1.2;
 }
 
+.envelope {
+  fill: rgb(47 141 136 / 12%);
+  stroke: #2f8d88;
+  stroke-width: 0.35;
+}
+
+.envelope.selected {
+  stroke: #c36e23;
+  stroke-width: 0.7;
+}
+
+.envelope.state-conflict {
+  fill: rgb(204 79 66 / 16%);
+  stroke: #cc4f42;
+  stroke-width: 0.6;
+  stroke-dasharray: 1.4 1;
+}
+
+.envelope.state-held {
+  fill: rgb(217 154 43 / 16%);
+  stroke: #c98a1c;
+  stroke-width: 0.6;
+}
+
+.envelope.state-invalid {
+  fill: rgb(120 130 140 / 10%);
+  stroke: #9aa4ad;
+  stroke-width: 0.4;
+  stroke-dasharray: 0.8 1;
+}
+
+.danger-zone {
+  fill: rgb(204 79 66 / 7%);
+  stroke: #cc4f42;
+  stroke-width: 0.45;
+  stroke-dasharray: 1.6 1.2;
+}
+
+.held-label {
+  fill: #a86a12;
+  font-size: 2.4px;
+  font-weight: 700;
+}
+
 .cue-point circle {
   fill: #fff;
   stroke: #247d7b;
@@ -403,6 +507,21 @@ function updateCue(key: keyof Cue, value: unknown) {
   background: #bb4d3e;
 }
 
+.stage-legend .env {
+  background: rgb(47 141 136 / 28%);
+  border: 1px solid #2f8d88;
+}
+
+.stage-legend .danger {
+  background: rgb(204 79 66 / 14%);
+  border: 1px dashed #cc4f42;
+}
+
+.stage-legend .held {
+  background: rgb(217 154 43 / 30%);
+  border: 1px solid #c98a1c;
+}
+
 .editor-panel {
   max-height: 730px;
   overflow: auto;
@@ -449,6 +568,13 @@ function updateCue(key: keyof Cue, value: unknown) {
   color: #53606c;
   background: #f6f8f8;
   font-size: 11px;
+}
+
+.envelope-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
 }
 
 .comment-block {

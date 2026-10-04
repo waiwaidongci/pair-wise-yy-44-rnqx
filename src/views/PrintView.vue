@@ -2,19 +2,29 @@
 import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useWorkshopStore } from '../stores/workshop'
+import { useOccupancyStore } from '../stores/occupancy'
 
 const store = useWorkshopStore()
+const occupancy = useOccupancyStore()
 const includeNotes = ref(true)
 const includeRoutes = ref(true)
 const includeComments = ref(false)
 
 function print() {
+  if (!occupancy.printValid) {
+    ElMessage.error('占用已失效：时间/路线/部门变更，请重新确认后再打印')
+    return
+  }
   window.print()
 }
 
 function exportCsv() {
+  if (!occupancy.printValid) {
+    ElMessage.error('占用已失效，请重新确认后再导出')
+    return
+  }
   const rows = [
-    ['编号', '时间码', '场景', '提示', '部门', '责任', '路线节点', '状态'],
+    ['编号', '时间码', '场景', '提示', '部门', '责任', '路线节点', '占用状态', '状态'],
     ...store.cues.map((cue) => [
       cue.id,
       cue.time,
@@ -23,6 +33,7 @@ function exportCsv() {
       cue.department,
       cue.owner,
       cue.route.map((point) => `${point.x},${point.y}`).join(' > '),
+      occupancy.statusOf(cue.id) ?? '未占用',
       cue.status,
     ]),
   ]
@@ -47,9 +58,19 @@ function exportCsv() {
       </div>
       <div class="actions">
         <el-button @click="exportCsv">导出 CSV</el-button>
-        <el-button type="primary" @click="print">打印 / 导出 PDF</el-button>
+        <el-button type="primary" :disabled="!occupancy.printValid" @click="print">打印 / 导出 PDF</el-button>
       </div>
     </div>
+
+    <el-alert
+      v-if="!occupancy.printValid"
+      class="print-invalid"
+      type="error"
+      show-icon
+      :closable="false"
+      title="确认与打印清单已失效"
+      description="时间、路线或部门变更后，已确认占用自动作废。请回到排练脚本重新确认占用批次，再生成打印清单。"
+    />
 
     <div class="print-options panel no-print">
       <strong>文档内容</strong>
@@ -80,6 +101,7 @@ function exportCsv() {
             <th>执行提示</th>
             <th>部门 / 责任</th>
             <th>时长</th>
+            <th>占用</th>
             <th>状态</th>
           </tr>
         </thead>
@@ -95,6 +117,17 @@ function exportCsv() {
             </td>
             <td>{{ cue.department }}<br /><small>{{ cue.owner }}</small></td>
             <td>{{ cue.duration }} 秒</td>
+            <td>
+              <el-tag
+                v-if="occupancy.statusOf(cue.id)"
+                size="small"
+                :type="occupancy.statusOf(cue.id) === '已生效' ? 'success' : occupancy.statusOf(cue.id) === '待命' ? 'warning' : 'danger'"
+                effect="plain"
+              >
+                {{ occupancy.statusOf(cue.id) }}
+              </el-tag>
+              <span v-else class="no-occ">未占用</span>
+            </td>
             <td>{{ cue.status }}</td>
           </tr>
         </tbody>
@@ -126,6 +159,15 @@ function exportCsv() {
   margin-left: auto;
   color: #74818c;
   font-size: 12px;
+}
+
+.print-invalid {
+  margin-bottom: 14px;
+}
+
+.no-occ {
+  color: #9aa4ad;
+  font-size: 11px;
 }
 
 .print-sheet {

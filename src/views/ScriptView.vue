@@ -2,8 +2,11 @@
 import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useWorkshopStore } from '../stores/workshop'
+import { useOccupancyStore } from '../stores/occupancy'
+import { fmtTime } from '../lib/stage-geometry'
 
 const store = useWorkshopStore()
+const occupancy = useOccupancyStore()
 const query = ref('')
 const selectedAct = ref('全部')
 const acts = computed(() => ['全部', ...new Set(store.cues.map((cue) => cue.act))])
@@ -14,10 +17,38 @@ const script = computed(() =>
     .sort((a, b) => a.time.localeCompare(b.time)),
 )
 
+// 占用批次：勾选待确认提示，合并为一个舞台占用批次抢单。
+const selectedIds = ref<Set<string>>(new Set())
+const pendingCues = computed(() =>
+  store.cues
+    .filter((cue) => !occupancy.isOccupied(cue.id))
+    .sort((a, b) => a.time.localeCompare(b.time)),
+)
+const heldEntries = computed(() =>
+  [...occupancy.held.entries()].map(([id, info]) => ({ id, ...info })),
+)
+const batches = computed(() => [...occupancy.log].reverse())
+
+function toggleSelect(id: string) {
+  const next = new Set(selectedIds.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  selectedIds.value = next
+}
+
+function confirmSelected() {
+  if (!selectedIds.value.size) {
+    ElMessage.info('请先勾选要并入占用批次的提示')
+    return
+  }
+  occupancy.confirmBatch([...selectedIds.value])
+  selectedIds.value = new Set()
+}
+
 function confirmCue(id: string) {
   store.selectedId = id
-  store.updateCue({ status: '已确认' })
-  ElMessage.success(`${id} 已并入当前排练脚本`)
+  const result = occupancy.confirmBatch([id])
+  if (result === 'committed') ElMessage.success(`${id} 已并入舞台占用批次`)
 }
 
 function lock() {
@@ -49,6 +80,123 @@ function lock() {
         {{ store.locked ? `基线 ${store.revision} 已锁定` : `${store.revision} · ${store.cues.filter((cue) => cue.status !== '已确认').length} 项待确认` }}
       </div>
     </div>
+
+    <section class="panel batch-panel">
+      <div class="panel-head">
+        <div>
+          <h3>舞台占用批次</h3>
+          <span class="muted">按运动范围预占舞台区，重叠即列冲突；机械与爆闪在演员未腾空危险区时待命。</span>
+        </div>
+        <div class="batch-controls">
+          <el-tag size="small" :type="occupancy.knownBase === occupancy.seq ? 'success' : 'warning'" effect="plain">
+            基准 R{{ occupancy.knownBase }} / 最新 R{{ occupancy.seq }}
+          </el-tag>
+          <el-button
+            v-if="occupancy.knownBase !== occupancy.seq"
+            size="small"
+            plain
+            @click="occupancy.rebase()"
+          >
+            重新基准
+          </el-button>
+          <el-switch v-model="occupancy.forceWriteFailure" active-text="模拟写入失败" inline-prompt />
+          <el-button size="small" @click="occupancy.simulateConcurrent">模拟他人抢先确认</el-button>
+          <el-button
+            size="small"
+            type="primary"
+            :disabled="store.locked || selectedIds.size === 0"
+            @click="confirmSelected"
+          >
+            确认占用批次（{{ selectedIds.size }}）
+          </el-button>
+        </div>
+      </div>
+
+      <el-alert
+        v-if="!occupancy.printValid"
+        class="batch-alert"
+        type="error"
+        show-icon
+        :closable="false"
+        title="确认与打印清单已失效"
+        description="时间、路线或部门发生变更，已确认占用作废并需重新确认；打印清单暂停生成。"
+      />
+
+      <el-alert
+        v-if="occupancy.failedWrite"
+        class="batch-alert"
+        type="error"
+        show-icon
+        :closable="false"
+        title="写入失败：占用未送达确认点"
+        :description="`确认点 ${occupancy.failedWrite.key.slice(0, 8)}… 挂起，重试复用同一占位键，不重复占位。`"
+      >
+        <div class="failed-actions">
+          <el-button size="small" type="primary" @click="occupancy.retryFailed(false)">从最后确认点重试</el-button>
+          <el-button size="small" @click="occupancy.retryFailed(true)">重新基准后重试</el-button>
+          <el-button size="small" text @click="occupancy.clearFailed">放弃</el-button>
+        </div>
+      </el-alert>
+
+      <div class="batch-grid">
+        <div class="batch-col">
+          <h4>待并入批次（{{ pendingCues.length }}）</h4>
+          <div class="pending-list">
+            <label v-for="cue in pendingCues" :key="cue.id" class="pending-item">
+              <el-checkbox
+                :model-value="selectedIds.has(cue.id)"
+                :disabled="store.locked"
+                @change="toggleSelect(cue.id)"
+              />
+              <span class="pending-id">{{ cue.id }}</span>
+              <span class="pending-title">{{ cue.title }}</span>
+              <time>{{ cue.time }}</time>
+            </label>
+            <el-empty v-if="!pendingCues.length" description="全部提示已占用" :image-size="40" />
+          </div>
+        </div>
+
+        <div class="batch-col">
+          <h4>待命与冲突</h4>
+          <div class="hold-list">
+            <div v-for="item in heldEntries" :key="item.id" class="hold-item">
+              <el-tag size="small" type="warning" effect="dark">待命</el-tag>
+              <strong>{{ item.id }}</strong>
+              <span>至 {{ fmtTime(item.until) }}</span>
+            </div>
+            <div v-for="(conflict, index) in occupancy.conflicts" :key="index" class="conflict-item">
+              <el-tag size="small" :type="conflict.kind === '安全互锁' ? 'warning' : 'danger'" effect="plain">
+                {{ conflict.kind }}
+              </el-tag>
+              <span>{{ conflict.description }}</span>
+            </div>
+            <el-empty v-if="!heldEntries.length && !occupancy.conflicts.length" description="无待命 / 无冲突" :image-size="40" />
+          </div>
+        </div>
+
+        <div class="batch-col">
+          <h4>确认点日志（{{ batches.length }}）</h4>
+          <div class="batch-log">
+            <div v-for="point in batches" :key="point.key" class="log-item" :class="point.status">
+              <div class="log-head">
+                <el-tag size="small" :type="point.status === '已生效' ? 'success' : 'info'" effect="plain">
+                  {{ point.status }}
+                </el-tag>
+                <span class="log-seq">R{{ point.seq }}</span>
+                <span class="log-key">{{ point.key.slice(0, 8) }}</span>
+              </div>
+              <div class="log-cues">{{ point.cueIds.join('、') }}</div>
+              <div v-if="point.conflicts.length" class="log-conflicts">
+                <span v-for="(conflict, index) in point.conflicts" :key="index">
+                  {{ conflict.kind }}：{{ conflict.description }}
+                </span>
+              </div>
+            </div>
+            <el-empty v-if="!batches.length" description="暂无确认点" :image-size="40" />
+          </div>
+        </div>
+      </div>
+    </section>
 
     <div class="script-layout">
       <section class="timeline">
@@ -131,6 +279,150 @@ function lock() {
   margin-left: auto;
   color: #5e6d79;
   font-size: 12px;
+}
+
+.batch-panel {
+  margin-bottom: 18px;
+  padding: 0 15px 14px;
+}
+
+.batch-panel .panel-head {
+  margin: 0 -15px 12px;
+}
+
+.batch-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.batch-alert {
+  margin-bottom: 10px;
+}
+
+.failed-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.batch-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.batch-col h4 {
+  margin: 0 0 8px;
+  color: #33465a;
+  font-size: 13px;
+}
+
+.pending-list,
+.hold-list,
+.batch-log {
+  display: grid;
+  gap: 6px;
+  max-height: 230px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.pending-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid #e6ebed;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.pending-id {
+  color: #1d7371;
+  font-weight: 700;
+}
+
+.pending-title {
+  flex: 1;
+  color: #33465a;
+}
+
+.pending-item time {
+  color: #8a959d;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+}
+
+.hold-item,
+.conflict-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid #f0e2c4;
+  border-radius: 6px;
+  background: #fdf8ec;
+  color: #6b5a2e;
+  font-size: 12px;
+}
+
+.conflict-item {
+  border-color: #f0d4cd;
+  background: #fdf1ee;
+  color: #8a4a3e;
+}
+
+.hold-item strong {
+  color: #1d7371;
+}
+
+.batch-log .log-item {
+  padding: 7px 9px;
+  border: 1px solid #e6ebed;
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+.batch-log .log-item.冲突待决 {
+  border-color: #e6c7c0;
+  background: #fdf4f1;
+}
+
+.log-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.log-seq {
+  color: #1d7371;
+  font-weight: 700;
+}
+
+.log-key {
+  margin-left: auto;
+  color: #9aa4ad;
+  font-family: ui-monospace, monospace;
+}
+
+.log-cues {
+  margin-top: 4px;
+  color: #33465a;
+  font-weight: 600;
+}
+
+.log-conflicts {
+  display: grid;
+  gap: 2px;
+  margin-top: 4px;
+  color: #8a4a3e;
+}
+
+@media (max-width: 1080px) {
+  .batch-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .script-layout {

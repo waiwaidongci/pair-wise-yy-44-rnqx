@@ -3,8 +3,10 @@ import { computed } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import axios from 'axios'
 import { useWorkshopStore } from '../stores/workshop'
+import { useOccupancyStore } from '../stores/occupancy'
 
 const store = useWorkshopStore()
+const occupancy = useOccupancyStore()
 const { data: project } = useQuery({
   queryKey: ['project'],
   queryFn: async () => (await axios.get('/api/project')).data,
@@ -98,10 +100,13 @@ const nextCues = computed(() => [...store.cues].sort((a, b) => a.time.localeComp
             <strong>{{ item.count }}</strong>
           </div>
         </div>
-        <div class="conflict-card" :class="{ ok: store.conflicts.length === 0 }">
-          <strong>{{ store.conflicts.length ? `发现 ${store.conflicts.length} 项潜在冲突` : '未发现时间冲突' }}</strong>
-          <p>{{ store.conflicts.length ? '同一场景存在同时触发的提示，请在舞台工作区核对优先级。' : '当前提示的时间与场景编排一致。' }}</p>
-          <el-button v-if="store.conflicts.length" text type="warning" @click="$router.push('/stage')">定位冲突</el-button>
+        <div class="conflict-card" :class="{ ok: occupancy.conflicts.length === 0 && occupancy.printValid }">
+          <strong>{{ occupancy.conflicts.length ? `发现 ${occupancy.conflicts.length} 项舞台占用冲突` : '舞台占用无冲突' }}</strong>
+          <p v-if="occupancy.held.size">
+            {{ occupancy.held.size }} 项机械/爆闪正在待命（演员未腾空危险区）。
+          </p>
+          <p>{{ occupancy.conflicts.length ? '按运动范围预占舞台区，重叠已标红；先到生效，后到留冲突。' : '已确认占用的时间窗与运动范围一致。' }}</p>
+          <el-button v-if="occupancy.conflicts.length" text type="warning" @click="$router.push('/stage')">定位冲突</el-button>
         </div>
       </section>
     </div>
