@@ -2,14 +2,21 @@
 import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useWorkshopStore } from '../stores/workshop'
+import { useOccupancyStore } from '../stores/occupancy'
 
 const store = useWorkshopStore()
+const occupancy = useOccupancyStore()
 const includeNotes = ref(true)
 const includeRoutes = ref(true)
 const includeComments = ref(false)
 
 function print() {
   window.print()
+}
+
+function recalcManifest() {
+  occupancy.generatePrintManifest()
+  ElMessage.success('打印清单已按最新占用批次重算')
 }
 
 function exportCsv() {
@@ -56,6 +63,10 @@ function exportCsv() {
       <el-checkbox v-model="includeNotes">执行说明</el-checkbox>
       <el-checkbox v-model="includeRoutes">路线坐标</el-checkbox>
       <el-checkbox v-model="includeComments">未解决留言</el-checkbox>
+      <el-tag :type="occupancy.printStale ? 'warning' : 'success'" effect="plain">
+        {{ occupancy.printStale ? '占用批次已变更 · 清单失效' : `占用批次 ${occupancy.batchId} 一致` }}
+      </el-tag>
+      <el-button v-if="occupancy.printStale" size="small" type="primary" plain @click="recalcManifest">重算清单</el-button>
       <span class="print-revision">版本 {{ store.revision }} · 生成于 {{ new Date().toLocaleString('zh-CN') }}</span>
     </div>
 
@@ -68,6 +79,8 @@ function exportCsv() {
         <dl>
           <div><dt>排练日</dt><dd>2026-10-08</dd></div>
           <div><dt>版本</dt><dd>{{ store.revision }}</dd></div>
+          <div><dt>占用批次</dt><dd>{{ occupancy.batchId }}</dd></div>
+          <div><dt>清单状态</dt><dd>{{ occupancy.printStale ? '失效待重算' : '有效' }}</dd></div>
           <div><dt>场地</dt><dd>上海大剧院 · 大剧场</dd></div>
         </dl>
       </header>

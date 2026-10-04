@@ -1,5 +1,6 @@
 import { computed, ref, watch } from 'vue'
 import { defineStore } from 'pinia'
+import type { Envelope } from '../domain/occupancy'
 
 export type Department = '舞台' | '灯光' | '音响' | '道具'
 export type Point = { x: number; y: number }
@@ -24,6 +25,7 @@ export type Cue = {
   entry: Point
   exit: Point
   route: Point[]
+  envelope?: Envelope | null
   note: string
   status: '草稿' | '待确认' | '已确认'
   comments: Comment[]
@@ -131,7 +133,7 @@ export const seedCues: Cue[] = [
     id: 'C-06',
     act: '第三幕',
     scene: '守望',
-    time: '00:39:10',
+    time: '00:38:50',
     title: '救生艇推入',
     department: '道具',
     owner: '道具组 / 群演乙组',
@@ -140,6 +142,22 @@ export const seedCues: Cue[] = [
     exit: { x: 70, y: 44 },
     route: [{ x: 88, y: 64 }, { x: 80, y: 54 }, { x: 70, y: 44 }],
     note: '与演员横穿路线冲突，需调整优先权。',
+    status: '待确认',
+    comments: [],
+  },
+  {
+    id: 'C-07',
+    act: '第二幕',
+    scene: '风暴',
+    time: '00:22:10',
+    title: '群演横穿码头甲板',
+    department: '舞台',
+    owner: '群演甲组',
+    duration: 60,
+    entry: { x: 30, y: 55 },
+    exit: { x: 68, y: 74 },
+    route: [{ x: 30, y: 55 }, { x: 48, y: 64 }, { x: 68, y: 74 }],
+    note: '穿越升降台危险半径，须等机械就位后放行。',
     status: '待确认',
     comments: [],
   },
